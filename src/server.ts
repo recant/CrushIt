@@ -6,13 +6,14 @@ import { readStore, updateStore } from './store.js';
 import { id } from './util.js';
 import { runMorning, evaluateDirective } from './core.js';
 import { startScheduler } from './scheduler.js';
+import { addCorrectionToAgent } from './maritime.js';
 import type { Evidence, Goal, User } from './types.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
 
 app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.resolve(process.cwd(), 'public')));
+app.use(express.static(path.resolve(process.cwd(), 'public'));
 
 const userSchema = z.object({
   name: z.string().min(1),
@@ -20,12 +21,14 @@ const userSchema = z.object({
   phone: z.string().optional(),
   timezone: z.string().min(1).default('America/New_York'),
   morningTime: z.string().regex(/^\d{2}:\d{2}$/).default('07:00'),
-  notificationChannel: z.enum(['maritime', 'sms', 'email', 'console']).default('console'),
+  notificationChannel: z.enum(['maritime', 'sms', 'email', 'console']).default('maritime'),
   boundaries: z.array(z.string()).default([]),
-  weeklyBudgetDollars: z.number().min(0).max(10000).default(30),
+  weeklyBudgetDollars: z.number().min(0).max(10000).default(0),
   penaltyPerFailureDollars: z.number().min(0).max(1000).default(5),
   weeklyPenaltyCapDollars: z.number().min(0).max(5000).default(20),
   stakeBalanceDollars: z.number().min(0).max(100000).default(50),
+}).refine((value) => Boolean(value.phone || value.email), {
+  message: 'A phone number or email address is required.',
 });
 
 const goalSchema = z.object({
@@ -42,10 +45,12 @@ const evidenceSchema = z.object({
   accepted: z.boolean().default(true),
 });
 
+const correctionSchema = z.object({ text: z.string().min(1).max(2000) });
+
 function asyncRoute(
   fn: (req: express.Request, res: express.Response) => Promise<void>,
 ): express.RequestHandler {
-  return (req: express.Request, res: express.Response, next: express.NextFunction) => void fn(req, res).catch(next);
+  return (req, res, next) => void fn(req, res).catch(next);
 }
 
 app.get('/api/state', asyncRoute(async (_req, res) => {
@@ -98,6 +103,22 @@ app.post('/api/run/morning/:userId', asyncRoute(async (req, res) => {
   res.json(directive);
 }));
 
+app.post('/api/users/:userId/corrections', asyncRoute(async (req, res) => {
+  const { text } = correctionSchema.parse(req.body);
+  const store = await readStore();
+  const user = store.users.find((item) => item.id === req.params.userId);
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+  await addCorrectionToAgent(user, text);
+  await updateStore((mutable) => {
+    const target = mutable.users.find((item) => item.id === req.params.userId);
+    if (target) target.boundaries.push(`User correction: ${text}`);
+  });
+  res.json({ ok: true });
+}));
+
 app.post('/api/directives/:directiveId/evidence', asyncRoute(async (req, res) => {
   const input = evidenceSchema.parse(req.body);
   const store = await readStore();
@@ -106,14 +127,9 @@ app.post('/api/directives/:directiveId/evidence', asyncRoute(async (req, res) =>
     return;
   }
   const evidence: Evidence = {
-    id: id('evidence'),
-    directiveId: req.params.directiveId,
-    source: input.source,
-    note: input.note,
-    numericValue: input.numericValue,
-    url: input.url || undefined,
-    accepted: input.accepted,
-    createdAt: new Date().toISOString(),
+    id: id('evidence'), directiveId: req.params.directiveId, source: input.source,
+    note: input.note, numericValue: input.numericValue, url: input.url || undefined,
+    accepted: input.accepted, createdAt: new Date().toISOString(),
   };
   await updateStore((mutable) => mutable.evidence.push(evidence));
   const status = await evaluateDirective(req.params.directiveId);
@@ -127,9 +143,7 @@ app.post('/api/directives/:directiveId/evaluate', asyncRoute(async (req, res) =>
 app.post('/api/directives/:directiveId/force-deadline', asyncRoute(async (req, res) => {
   await updateStore((store) => {
     const directive = store.directives.find((d) => d.id === req.params.directiveId);
-    if (directive && directive.status === 'active') {
-      directive.deadline = new Date(Date.now() - 1000).toISOString();
-    }
+    if (directive && directive.status === 'active') directive.deadline = new Date(Date.now() - 1000).toISOString();
   });
   res.json({ status: await evaluateDirective(req.params.directiveId) });
 }));
@@ -142,20 +156,15 @@ app.post('/api/webhooks/evidence/:directiveId', asyncRoute(async (req, res) => {
   }
   const input = evidenceSchema.parse(req.body);
   const evidence: Evidence = {
-    id: id('evidence'),
-    directiveId: req.params.directiveId,
-    source: input.source,
-    note: input.note,
-    numericValue: input.numericValue,
-    url: input.url || undefined,
-    accepted: input.accepted,
-    createdAt: new Date().toISOString(),
+    id: id('evidence'), directiveId: req.params.directiveId, source: input.source,
+    note: input.note, numericValue: input.numericValue, url: input.url || undefined,
+    accepted: input.accepted, createdAt: new Date().toISOString(),
   };
   await updateStore((store) => store.evidence.push(evidence));
   res.json({ ok: true, status: await evaluateDirective(req.params.directiveId) });
 }));
 
-app.get('/health', (_req: express.Request, res: express.Response) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(error);
@@ -167,6 +176,4 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 });
 
 startScheduler();
-app.listen(port, () => {
-  console.log(`Goal Governor running at http://localhost:${port}`);
-});
+app.listen(port, () => console.log(`Goal Governor running at http://localhost:${port}`));
