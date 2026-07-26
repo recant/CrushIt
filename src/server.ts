@@ -53,6 +53,12 @@ function asyncRoute(
   return (req, res, next) => void fn(req, res).catch(next);
 }
 
+function requireRouteParam(value: string | string[] | undefined, name: string): string {
+  const resolved = Array.isArray(value) ? value[0] : value;
+  if (!resolved) throw new Error(`Missing route parameter: ${name}`);
+  return resolved;
+}
+
 app.get('/api/state', asyncRoute(async (_req, res) => {
   res.json(await readStore());
 }));
@@ -99,56 +105,67 @@ app.post('/api/goals', asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/run/morning/:userId', asyncRoute(async (req, res) => {
-  const directive = await runMorning(req.params.userId);
+  const userId = requireRouteParam(req.params.userId, 'userId');
+  const directive = await runMorning(userId);
   res.json(directive);
 }));
 
 app.post('/api/users/:userId/corrections', asyncRoute(async (req, res) => {
+  const userId = requireRouteParam(req.params.userId, 'userId');
   const { text } = correctionSchema.parse(req.body);
   const store = await readStore();
-  const user = store.users.find((item) => item.id === req.params.userId);
+  const user = store.users.find((item) => item.id === userId);
   if (!user) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
   await addCorrectionToAgent(user, text);
   await updateStore((mutable) => {
-    const target = mutable.users.find((item) => item.id === req.params.userId);
+    const target = mutable.users.find((item) => item.id === userId);
     if (target) target.boundaries.push(`User correction: ${text}`);
   });
   res.json({ ok: true });
 }));
 
 app.post('/api/directives/:directiveId/evidence', asyncRoute(async (req, res) => {
+  const directiveId = requireRouteParam(req.params.directiveId, 'directiveId');
   const input = evidenceSchema.parse(req.body);
   const store = await readStore();
-  if (!store.directives.some((d) => d.id === req.params.directiveId)) {
+  if (!store.directives.some((d) => d.id === directiveId)) {
     res.status(404).json({ error: 'Directive not found' });
     return;
   }
   const evidence: Evidence = {
-    id: id('evidence'), directiveId: req.params.directiveId, source: input.source,
-    note: input.note, numericValue: input.numericValue, url: input.url || undefined,
-    accepted: input.accepted, createdAt: new Date().toISOString(),
+    id: id('evidence'),
+    directiveId,
+    source: input.source,
+    note: input.note,
+    numericValue: input.numericValue,
+    url: input.url || undefined,
+    accepted: input.accepted,
+    createdAt: new Date().toISOString(),
   };
   await updateStore((mutable) => mutable.evidence.push(evidence));
-  const status = await evaluateDirective(req.params.directiveId);
+  const status = await evaluateDirective(directiveId);
   res.status(201).json({ evidence, status });
 }));
 
 app.post('/api/directives/:directiveId/evaluate', asyncRoute(async (req, res) => {
-  res.json({ status: await evaluateDirective(req.params.directiveId) });
+  const directiveId = requireRouteParam(req.params.directiveId, 'directiveId');
+  res.json({ status: await evaluateDirective(directiveId) });
 }));
 
 app.post('/api/directives/:directiveId/force-deadline', asyncRoute(async (req, res) => {
+  const directiveId = requireRouteParam(req.params.directiveId, 'directiveId');
   await updateStore((store) => {
-    const directive = store.directives.find((d) => d.id === req.params.directiveId);
+    const directive = store.directives.find((d) => d.id === directiveId);
     if (directive && directive.status === 'active') directive.deadline = new Date(Date.now() - 1000).toISOString();
   });
-  res.json({ status: await evaluateDirective(req.params.directiveId) });
+  res.json({ status: await evaluateDirective(directiveId) });
 }));
 
 app.post('/api/webhooks/evidence/:directiveId', asyncRoute(async (req, res) => {
+  const directiveId = requireRouteParam(req.params.directiveId, 'directiveId');
   const secret = req.header('x-goal-governor-secret');
   if (!process.env.APP_WEBHOOK_SECRET || secret !== process.env.APP_WEBHOOK_SECRET) {
     res.status(401).json({ error: 'Bad webhook secret' });
@@ -156,12 +173,17 @@ app.post('/api/webhooks/evidence/:directiveId', asyncRoute(async (req, res) => {
   }
   const input = evidenceSchema.parse(req.body);
   const evidence: Evidence = {
-    id: id('evidence'), directiveId: req.params.directiveId, source: input.source,
-    note: input.note, numericValue: input.numericValue, url: input.url || undefined,
-    accepted: input.accepted, createdAt: new Date().toISOString(),
+    id: id('evidence'),
+    directiveId,
+    source: input.source,
+    note: input.note,
+    numericValue: input.numericValue,
+    url: input.url || undefined,
+    accepted: input.accepted,
+    createdAt: new Date().toISOString(),
   };
   await updateStore((store) => store.evidence.push(evidence));
-  res.json({ ok: true, status: await evaluateDirective(req.params.directiveId) });
+  res.json({ ok: true, status: await evaluateDirective(directiveId) });
 }));
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
