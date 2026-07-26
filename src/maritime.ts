@@ -30,6 +30,7 @@ Choose exactly one highest-leverage action for today. Make it concrete, time-bou
 Do not create medical, illegal, humiliating, dangerous, sleep-depriving, or financially reckless assignments.
 Never invent financial penalties. The application supplies an authorized penalty amount separately.
 When asked for JSON, return only valid JSON with no markdown.
+When asked to deliver a directive, use your Maritime Identity communication tools. Send the exact supplied content and do not embellish it.
 `;
 
 export async function ensureAgent(user: User): Promise<{ id: string; name: string }> {
@@ -40,7 +41,7 @@ export async function ensureAgent(user: User): Promise<{ id: string; name: strin
     externalId: `goal_governor_${user.id}`,
     name,
     template: 'openclaw_identity',
-    instructions: `${BASE_INSTRUCTIONS}\nUser name: ${user.name}\nUser phone: ${user.phone ?? 'not supplied'}\nUser email: ${user.email ?? 'not supplied'}\nTimezone: ${user.timezone}\nBoundaries: ${user.boundaries.join('; ') || 'none supplied'}`,
+    instructions: `${BASE_INSTRUCTIONS}\nUser name: ${user.name}\nUser phone: ${user.phone ?? 'not supplied'}\nUser email: ${user.email ?? 'not supplied'}\nTimezone: ${user.timezone}\nBoundaries and context: ${user.boundaries.join('; ') || 'none supplied'}`,
     idleTtlSeconds: 900,
   });
   return { id: agent.id, name };
@@ -62,9 +63,7 @@ export interface PlannedDirective {
 
 function extractJson(raw: string): unknown {
   const trimmed = raw.trim();
-  const withoutFence = trimmed
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '');
+  const withoutFence = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   const first = withoutFence.indexOf('{');
   const last = withoutFence.lastIndexOf('}');
   if (first < 0 || last < first) throw new Error(`Agent did not return JSON: ${raw.slice(0, 300)}`);
@@ -85,6 +84,7 @@ export async function planToday(user: User, goals: Goal[]): Promise<PlannedDirec
       estimatedProgressPoints: 3,
     };
   }
+
   const maritime = getClient();
   const agent = await ensureAgent(user);
   const now = new Date();
@@ -129,15 +129,42 @@ The deadline must be in the future, normally within 36 hours. estimatedProgressP
     conversationId: `daily-planning-${user.id}`,
   });
   if (error) throw new Error(error);
-  const parsed = extractJson(response ?? '') as PlannedDirective;
-  return parsed;
+  return extractJson(response ?? '') as PlannedDirective;
+}
+
+export async function addCorrectionToAgent(user: User, text: string): Promise<void> {
+  if (!user.maritimeAgentId) throw new Error('The Maritime agent has not been provisioned yet.');
+  const maritime = getClient();
+  const { error } = await maritime.agents.chat(
+    user.maritimeAgentId,
+    `Record this user correction as persistent planning context. Do not generate a new directive yet. Correction: ${text}`,
+    { conversationId: `user-context-${user.id}` },
+  );
+  if (error) throw new Error(error);
 }
 
 export async function deliverThroughMaritime(user: User, agentId: string, message: string): Promise<void> {
   const maritime = getClient();
-  const prompt = `Send the following message unchanged to this user using your own Maritime Identity tools. Prefer SMS to ${user.phone ?? 'no phone supplied'}; otherwise email ${user.email ?? 'no email supplied'}; otherwise use a connected WhatsApp or Telegram channel. Do not ask a question and do not add commentary. If no channel is available, report that clearly.\n\n${message}`;
-  const { error } = await maritime.agents.chat(agentId, prompt, {
+  const destinations = [
+    user.phone ? `SMS to ${user.phone}` : null,
+    user.email ? `email to ${user.email}` : null,
+  ].filter(Boolean).join(' and ');
+  if (!destinations) throw new Error('At least one phone number or email address is required for Maritime delivery.');
+
+  const prompt = `
+Use your Maritime Identity communication tools to send the exact directive below to ${destinations}.
+If both a phone number and email are supplied, send it through both channels.
+Do not ask the user a question. Do not add commentary. Do not merely draft the message: actually send it.
+After attempting delivery, return a one-line status beginning with SENT or FAILED.
+
+DIRECTIVE
+${message}
+`;
+  const { response, error } = await maritime.agents.chat(agentId, prompt, {
     conversationId: `delivery-${user.id}`,
   });
   if (error) throw new Error(error);
+  if (!/^SENT\b/i.test((response ?? '').trim())) {
+    throw new Error(`Maritime agent did not confirm delivery: ${(response ?? 'no response').slice(0, 300)}`);
+  }
 }
