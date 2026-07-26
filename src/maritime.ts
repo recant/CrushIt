@@ -7,6 +7,7 @@ let client: Maritime | undefined;
 
 const MARITIME_API_BASE = 'https://api.maritime.sh';
 const MARITIME_PROVISIONING_BASE = 'https://api.maritime.sh/api/v1';
+const DEFAULT_GEMINI_MODEL = 'google/gemini-2.5-flash';
 
 function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -27,6 +28,18 @@ function maritimeApiKey(): string {
     throw new Error('MARITIME_API_KEY is missing. Copy .env.example to .env and add a Maritime API key.');
   }
   return apiKey;
+}
+
+function geminiApiKey(): string {
+  const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY is missing. Create a free Gemini API key in Google AI Studio and add it to this app\'s .env file.');
+  }
+  return apiKey;
+}
+
+function goalGovernorModel(): string {
+  return process.env.GOAL_GOVERNOR_MODEL?.trim() || DEFAULT_GEMINI_MODEL;
 }
 
 function getClient(): Maritime {
@@ -74,10 +87,28 @@ export async function waitForAgentReady(agentId: string): Promise<void> {
 
 interface MaritimeEnvironmentVariable {
   key?: string;
+  value?: string;
+}
+
+async function setAgentEnvironmentVariable(
+  agentId: string,
+  key: string,
+  value: string,
+  isSecret: boolean,
+): Promise<void> {
+  const response = await fetch(`${MARITIME_PROVISIONING_BASE}/agents/${encodeURIComponent(agentId)}/env`, {
+    method: 'POST',
+    headers: { 'X-API-Key': maritimeApiKey(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value, is_secret: isSecret }),
+  });
+  if (!response.ok) {
+    throw new Error(`Could not configure ${key} on the Maritime agent (${response.status})${await responseDetails(response)}. The Maritime key needs manage scope.`);
+  }
 }
 
 async function ensureAgentModelProvider(agentId: string): Promise<void> {
   const apiKey = maritimeApiKey();
+  const model = goalGovernorModel();
   const envResponse = await fetch(`${MARITIME_PROVISIONING_BASE}/agents/${encodeURIComponent(agentId)}/env`, {
     headers: { 'X-API-Key': apiKey },
   });
@@ -86,33 +117,45 @@ async function ensureAgentModelProvider(agentId: string): Promise<void> {
   }
 
   const variables = await envResponse.json() as MaritimeEnvironmentVariable[];
-  if (variables.some((variable) => variable.key === 'OPENAI_API_KEY' || variable.key === 'ANTHROPIC_API_KEY')) return;
+  const hasGeminiKey = variables.some((variable) => variable.key === 'GEMINI_API_KEY' || variable.key === 'GOOGLE_API_KEY');
+  const configuredModel = variables.find((variable) => variable.key === 'GOAL_GOVERNOR_MODEL')?.value;
+  if (hasGeminiKey && configuredModel === model) return;
 
-  const provider = process.env.OPENAI_API_KEY
-    ? { key: 'OPENAI_API_KEY', value: process.env.OPENAI_API_KEY }
-    : process.env.ANTHROPIC_API_KEY
-      ? { key: 'ANTHROPIC_API_KEY', value: process.env.ANTHROPIC_API_KEY }
-      : undefined;
-
-  if (!provider) {
-    throw new Error('The OpenClaw Identity agent has no model provider. Add OPENAI_API_KEY or ANTHROPIC_API_KEY to this app\'s .env file. Maritime hosts the agent; OpenClaw still needs a model provider.');
+  if (!hasGeminiKey) {
+    await setAgentEnvironmentVariable(agentId, 'GEMINI_API_KEY', geminiApiKey(), true);
   }
+  await setAgentEnvironmentVariable(agentId, 'GOAL_GOVERNOR_MODEL', model, false);
 
-  const setResponse = await fetch(`${MARITIME_PROVISIONING_BASE}/agents/${encodeURIComponent(agentId)}/env`, {
+  const configurationScript = `#!/bin/sh
+set -eu
+openclaw config set agents.defaults.model.primary '${JSON.stringify(model)}' --strict-json
+openclaw config get agents.defaults.model.primary
+`;
+
+  const fileResponse = await fetch(`${MARITIME_PROVISIONING_BASE}/agents/${encodeURIComponent(agentId)}/files`, {
     method: 'POST',
     headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key: provider.key, value: provider.value, is_secret: true }),
+    body: JSON.stringify({
+      files: [{
+        path: 'configure-goal-governor-model.sh',
+        content: configurationScript,
+        executable: true,
+        run_on_deploy: true,
+        target_dir: '/maritime/scripts',
+      }],
+    }),
   });
-  if (!setResponse.ok) {
-    throw new Error(`Could not configure ${provider.key} on the Maritime agent (${setResponse.status})${await responseDetails(setResponse)}. The Maritime key needs manage scope.`);
+  if (!fileResponse.ok) {
+    throw new Error(`Could not install the OpenClaw Gemini model configuration (${fileResponse.status})${await responseDetails(fileResponse)}. The Maritime key needs deploy scope.`);
   }
 
-  const restartResponse = await fetch(`${MARITIME_PROVISIONING_BASE}/agents/${encodeURIComponent(agentId)}/restart`, {
+  const deployResponse = await fetch(`${MARITIME_PROVISIONING_BASE}/agents/${encodeURIComponent(agentId)}/deploy`, {
     method: 'POST',
     headers: { 'X-API-Key': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
   });
-  if (!restartResponse.ok) {
-    throw new Error(`Could not restart the Maritime agent after configuring its model (${restartResponse.status})${await responseDetails(restartResponse)}`);
+  if (!deployResponse.ok && deployResponse.status !== 409) {
+    throw new Error(`Could not redeploy the Maritime agent after configuring Gemini (${deployResponse.status})${await responseDetails(deployResponse)}`);
   }
 
   await sleep(2_500);
