@@ -73,7 +73,10 @@ function renderDashboard() {
 
   if (directive) {
     $('#directive-title').textContent = directive.title;
-    $('#directive-body').textContent = directive.instruction;
+    const deliveryWarning = directive.deliveryStatus === 'failed'
+      ? `\n\nDelivery is not active yet. Configure the Maritime/Inkbox email and phone channel, then the scheduler will retry automatically. Technical detail: ${directive.deliveryError || 'delivery failed'}`
+      : '';
+    $('#directive-body').textContent = `${directive.instruction}${deliveryWarning}`;
     $('#directive-proof').textContent = directive.evidenceRule?.description || 'Verified completion evidence';
     $('#directive-deadline').textContent = new Date(directive.deadline).toLocaleString();
   } else {
