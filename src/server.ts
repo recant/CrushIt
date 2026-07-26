@@ -13,7 +13,7 @@ const app = express();
 const port = Number(process.env.PORT ?? 3000);
 
 app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.resolve(process.cwd(), 'public'));
+app.use(express.static(path.resolve(process.cwd(), 'public')));
 
 const userSchema = z.object({
   name: z.string().min(1),
