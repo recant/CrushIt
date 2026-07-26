@@ -6,7 +6,8 @@ import { readStore, updateStore } from './store.js';
 import { id } from './util.js';
 import { runMorning, evaluateDirective } from './core.js';
 import { startScheduler } from './scheduler.js';
-import { addCorrectionToAgent } from './maritime.js';
+import { addCorrectionToAgent, continueOnboarding, ensureAgent } from './maritime.js';
+import type { OnboardingTranscriptMessage, OnboardingTurn } from './maritime.js';
 import type { Evidence, Goal, User } from './types.js';
 
 const app = express();
@@ -46,6 +47,19 @@ const evidenceSchema = z.object({
 });
 
 const correctionSchema = z.object({ text: z.string().min(1).max(2000) });
+const transcriptMessageSchema = z.object({
+  role: z.enum(['user', 'agent']),
+  text: z.string().min(1).max(4000),
+});
+const onboardingStartSchema = z.object({
+  goal: z.string().min(3).max(4000),
+  timezone: z.string().min(1).default('America/New_York'),
+  transcript: z.array(transcriptMessageSchema).max(30).default([]),
+});
+const onboardingResponseSchema = z.object({
+  message: z.string().min(1).max(4000),
+  transcript: z.array(transcriptMessageSchema).max(30).default([]),
+});
 
 function asyncRoute(
   fn: (req: express.Request, res: express.Response) => Promise<void>,
@@ -59,8 +73,144 @@ function requireRouteParam(value: string | string[] | undefined, name: string): 
   return resolved;
 }
 
+function normalizeOptionalContact(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || /^(skip|none|no)$/i.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function normalizeTargetDate(value: string): string | undefined {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? undefined : new Date(parsed).toISOString().slice(0, 10);
+}
+
+async function applyOnboardingTurn(
+  userId: string,
+  goalId: string,
+  turn: OnboardingTurn,
+): Promise<{ user: User; goal: Goal; message: string; complete: boolean }> {
+  await updateStore((store) => {
+    const user = store.users.find((item) => item.id === userId);
+    const goal = store.goals.find((item) => item.id === goalId);
+    if (!user || !goal) throw new Error('Onboarding session no longer exists.');
+
+    if (turn.updates.targetDate !== null) {
+      goal.targetDate = normalizeTargetDate(turn.updates.targetDate);
+    }
+
+    if (turn.updates.currentLevel !== null) {
+      user.boundaries = user.boundaries.filter((item) => !item.startsWith('Starting point: '));
+      const currentLevel = turn.updates.currentLevel.trim();
+      if (currentLevel) user.boundaries.push(`Starting point: ${currentLevel}`);
+    }
+
+    for (const constraint of turn.updates.constraints) {
+      const normalized = constraint.trim();
+      if (!normalized || /^none$/i.test(normalized) || user.boundaries.includes(normalized)) continue;
+      user.boundaries.push(normalized);
+    }
+
+    if (turn.updates.phone !== null) user.phone = normalizeOptionalContact(turn.updates.phone);
+    if (turn.updates.email !== null) user.email = normalizeOptionalContact(turn.updates.email);
+    if (turn.updates.morningTime !== null && /^\d{2}:\d{2}$/.test(turn.updates.morningTime)) {
+      user.morningTime = turn.updates.morningTime;
+    }
+  });
+
+  const store = await readStore();
+  const user = store.users.find((item) => item.id === userId);
+  const goal = store.goals.find((item) => item.id === goalId);
+  if (!user || !goal) throw new Error('Onboarding session no longer exists.');
+
+  const hasDestination = Boolean(user.phone || user.email);
+  return {
+    user,
+    goal,
+    complete: turn.complete && hasDestination,
+    message: turn.complete && !hasDestination
+      ? 'What phone number or email address should receive your daily directive?'
+      : turn.message,
+  };
+}
+
 app.get('/api/state', asyncRoute(async (_req, res) => {
   res.json(await readStore());
+}));
+
+app.post('/api/onboarding/start', asyncRoute(async (req, res) => {
+  const input = onboardingStartSchema.parse(req.body);
+  const user: User = {
+    id: id('user'),
+    name: 'User',
+    timezone: input.timezone,
+    morningTime: '07:00',
+    notificationChannel: 'maritime',
+    boundaries: [],
+    weeklyBudgetCents: 0,
+    penaltyPerFailureCents: 500,
+    weeklyPenaltyCapCents: 2000,
+    stakeBalanceCents: 5000,
+    createdAt: new Date().toISOString(),
+  };
+  const goal: Goal = {
+    id: id('goal'),
+    userId: user.id,
+    outcome: input.goal,
+    status: 'active',
+    progressPercent: 0,
+    createdAt: new Date().toISOString(),
+  };
+
+  await updateStore((store) => {
+    store.users.push(user);
+    store.goals.push(goal);
+  });
+
+  const agent = await ensureAgent(user);
+  const currentUser: User = { ...user, maritimeAgentId: agent.id, maritimeAgentName: agent.name };
+  await updateStore((store) => {
+    const target = store.users.find((item) => item.id === user.id);
+    if (target) {
+      target.maritimeAgentId = agent.id;
+      target.maritimeAgentName = agent.name;
+    }
+  });
+
+  const transcript = input.transcript as OnboardingTranscriptMessage[];
+  const turn = await continueOnboarding(currentUser, goal, input.goal, transcript);
+  const applied = await applyOnboardingTurn(user.id, goal.id, turn);
+  const directive = applied.complete ? await runMorning(user.id) : undefined;
+
+  res.status(201).json({
+    userId: user.id,
+    message: applied.message,
+    complete: applied.complete,
+    directive,
+  });
+}));
+
+app.post('/api/onboarding/:userId/respond', asyncRoute(async (req, res) => {
+  const userId = requireRouteParam(req.params.userId, 'userId');
+  const input = onboardingResponseSchema.parse(req.body);
+  const store = await readStore();
+  const user = store.users.find((item) => item.id === userId);
+  const goal = store.goals.filter((item) => item.userId === userId && item.status === 'active').at(-1);
+  if (!user || !goal) {
+    res.status(404).json({ error: 'Onboarding session not found.' });
+    return;
+  }
+
+  const transcript = input.transcript as OnboardingTranscriptMessage[];
+  const turn = await continueOnboarding(user, goal, input.message, transcript);
+  const applied = await applyOnboardingTurn(user.id, goal.id, turn);
+  const directive = applied.complete ? await runMorning(user.id) : undefined;
+
+  res.json({
+    userId,
+    message: applied.message,
+    complete: applied.complete,
+    directive,
+  });
 }));
 
 app.post('/api/users', asyncRoute(async (req, res) => {
@@ -87,7 +237,7 @@ app.post('/api/users', asyncRoute(async (req, res) => {
 app.post('/api/goals', asyncRoute(async (req, res) => {
   const input = goalSchema.parse(req.body);
   const store = await readStore();
-  if (!store.users.some((u) => u.id === input.userId)) {
+  if (!store.users.some((user) => user.id === input.userId)) {
     res.status(404).json({ error: 'User not found' });
     return;
   }
@@ -100,7 +250,7 @@ app.post('/api/goals', asyncRoute(async (req, res) => {
     progressPercent: 0,
     createdAt: new Date().toISOString(),
   };
-  await updateStore((mutable) => mutable.goals.push(goal));
+  await updateStore((store) => store.goals.push(goal));
   res.status(201).json(goal);
 }));
 
@@ -131,7 +281,7 @@ app.post('/api/directives/:directiveId/evidence', asyncRoute(async (req, res) =>
   const directiveId = requireRouteParam(req.params.directiveId, 'directiveId');
   const input = evidenceSchema.parse(req.body);
   const store = await readStore();
-  if (!store.directives.some((d) => d.id === directiveId)) {
+  if (!store.directives.some((directive) => directive.id === directiveId)) {
     res.status(404).json({ error: 'Directive not found' });
     return;
   }
@@ -145,7 +295,7 @@ app.post('/api/directives/:directiveId/evidence', asyncRoute(async (req, res) =>
     accepted: input.accepted,
     createdAt: new Date().toISOString(),
   };
-  await updateStore((mutable) => mutable.evidence.push(evidence));
+  await updateStore((store) => store.evidence.push(evidence));
   const status = await evaluateDirective(directiveId);
   res.status(201).json({ evidence, status });
 }));
@@ -158,7 +308,7 @@ app.post('/api/directives/:directiveId/evaluate', asyncRoute(async (req, res) =>
 app.post('/api/directives/:directiveId/force-deadline', asyncRoute(async (req, res) => {
   const directiveId = requireRouteParam(req.params.directiveId, 'directiveId');
   await updateStore((store) => {
-    const directive = store.directives.find((d) => d.id === directiveId);
+    const directive = store.directives.find((item) => item.id === directiveId);
     if (directive && directive.status === 'active') directive.deadline = new Date(Date.now() - 1000).toISOString();
   });
   res.json({ status: await evaluateDirective(directiveId) });
