@@ -7,76 +7,57 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <header>
-    <div>
-      <p class="eyebrow">GOAL GOVERNOR</p>
-      <h1>You choose the outcome.<br />The agent chooses today.</h1>
-      <p class="lede">A zero-management goal system powered by one persistent Maritime agent per person.</p>
-    </div>
-    <button id="refresh">Refresh</button>
-  </header>
-
   <main>
-    <section class="setup panel">
-      <h2>1. Create a person</h2>
-      <form id="user-form">
-        <div class="grid two">
-          <label>Name<input name="name" required placeholder="Sawyer" /></label>
-          <label>Timezone<input name="timezone" value="America/New_York" /></label>
-          <label>Morning command time<input name="morningTime" type="time" value="07:00" /></label>
-          <label>Delivery
-            <select name="notificationChannel">
-              <option value="console">Console demo</option>
-              <option value="maritime">Maritime WhatsApp/Telegram</option>
-              <option value="sms">Twilio SMS</option>
-              <option value="email">Resend email</option>
-            </select>
-          </label>
-          <label>Email<input name="email" type="email" placeholder="you@example.com" /></label>
-          <label>Phone<input name="phone" placeholder="+16175551234" /></label>
-          <label>Failure penalty ($)<input name="penalty" type="number" min="0" step="1" value="5" /></label>
-          <label>Weekly penalty cap ($)<input name="cap" type="number" min="0" step="1" value="20" /></label>
-          <label>Commitment balance ($)<input name="balance" type="number" min="0" step="1" value="50" /></label>
-          <label>Agent spending budget/week ($)<input name="budget" type="number" min="0" step="1" value="30" /></label>
+    <section id="onboarding" class="onboarding-shell">
+      <p class="brand">GOAL GOVERNOR</p>
+      <div class="chat-card">
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="chat-form" class="composer">
+          <textarea id="chat-input" rows="1" autocomplete="off" placeholder="Tell me what you want to accomplish…" required></textarea>
+          <button type="submit">Send</button>
+        </form>
+      </div>
+      <p class="privacy-note">You choose the outcome. The agent builds the plan and tells you exactly what to do next.</p>
+    </section>
+
+    <section id="dashboard" class="dashboard hidden">
+      <header class="topbar">
+        <div><p class="eyebrow">ACTIVE GOAL</p><h1 id="goal-title">Your goal</h1></div>
+        <button id="reset" class="secondary">Start over</button>
+      </header>
+
+      <section class="directive-card">
+        <p class="eyebrow">TODAY'S DIRECTIVE</p>
+        <h2 id="directive-title">Generating your first action…</h2>
+        <p id="directive-body"></p>
+        <div class="directive-meta">
+          <span><strong>Deadline:</strong> <span id="directive-deadline">Today</span></span>
+          <span><strong>Proof:</strong> <span id="directive-proof">Completion evidence</span></span>
         </div>
-        <label>Hard boundaries<textarea name="boundaries" placeholder="Never cancel class. Never spend over $20 without asking. No medical directives."></textarea></label>
-        <button type="submit">Create person</button>
-      </form>
-    </section>
+      </section>
 
-    <section class="setup panel">
-      <h2>2. State one outcome</h2>
-      <form id="goal-form">
-        <label>Person<select name="userId" id="goal-user" required></select></label>
-        <label>Outcome<textarea name="outcome" required placeholder="Get five active users for my healthcare AI product by September 1."></textarea></label>
-        <label>Target date<input name="targetDate" type="date" /></label>
-        <button type="submit">Activate goal</button>
-      </form>
-    </section>
-
-    <section class="panel wide">
-      <div class="section-head">
-        <div><p class="eyebrow">CONTROL SURFACE</p><h2>People and goals</h2></div>
+      <div class="dashboard-grid">
+        <section class="panel">
+          <div class="section-head"><h2>Progress</h2><strong id="progress-label">0%</strong></div>
+          <div class="progress"><span id="progress-bar"></span></div>
+          <p id="trajectory" class="muted">The agent is calculating your trajectory.</p>
+        </section>
+        <section class="panel">
+          <h2>Plan</h2>
+          <ol id="milestones" class="milestones"></ol>
+        </section>
       </div>
-      <div id="people" class="cards"></div>
-    </section>
 
-    <section class="panel wide">
-      <div class="section-head">
-        <div><p class="eyebrow">TODAY</p><h2>Mandatory directives</h2></div>
-      </div>
-      <div id="directives" class="cards"></div>
-    </section>
-
-    <section class="panel wide">
-      <div class="section-head">
-        <div><p class="eyebrow">ENFORCEMENT LEDGER</p><h2>Consequences</h2></div>
-      </div>
-      <div id="penalties" class="cards"></div>
+      <section class="panel conversation-panel">
+        <h2>Tell the agent something</h2>
+        <form id="correction-form" class="composer compact">
+          <input id="correction-input" placeholder="I'm unavailable tonight, or explain what changed…" />
+          <button type="submit">Send</button>
+        </form>
+      </section>
     </section>
   </main>
-
-  <template id="empty-template"><p class="empty">Nothing here yet.</p></template>
   <script type="module" src="/app.js"></script>
 </body>
 </html>
+
