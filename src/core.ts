@@ -5,22 +5,65 @@ import { notify } from './notifier.js';
 import { completeDirective, evidenceSatisfies, failDirective } from './enforcement.js';
 import { id } from './util.js';
 
+async function deliverDirective(user: User, directive: Directive): Promise<Directive> {
+  try {
+    await notify(user, directive);
+    const deliveredAt = new Date().toISOString();
+    await updateStore((store) => {
+      const stored = store.directives.find((item) => item.id === directive.id);
+      if (stored) {
+        stored.deliveryStatus = 'sent';
+        stored.deliveryError = undefined;
+        stored.deliveredAt = deliveredAt;
+      }
+    });
+    return { ...directive, deliveryStatus: 'sent', deliveryError: undefined, deliveredAt };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown delivery error';
+    console.warn('Directive delivery failed for', directive.id, message);
+    await updateStore((store) => {
+      const stored = store.directives.find((item) => item.id === directive.id);
+      if (stored) {
+        stored.deliveryStatus = 'failed';
+        stored.deliveryError = message;
+      }
+    });
+    return { ...directive, deliveryStatus: 'failed', deliveryError: message };
+  }
+}
+
 export async function runMorning(userId: string): Promise<Directive> {
   const store = await readStore();
   const user = store.users.find((item) => item.id === userId);
   if (!user) throw new Error('User not found.');
-  const activeExisting = store.directives.find((d) => d.userId === userId && d.status === 'active');
-  if (activeExisting) return activeExisting;
-  const goals = store.goals.filter((g) => g.userId === userId && g.status === 'active');
+
+  const activeExisting = store.directives.find((directive) => directive.userId === userId && directive.status === 'active');
+  if (activeExisting) {
+    if (activeExisting.deliveryStatus === 'sent') return activeExisting;
+    const agent = await ensureAgent(user);
+    const currentUser: User = { ...user, maritimeAgentId: agent.id, maritimeAgentName: agent.name };
+    await updateStore((mutable) => {
+      const storedUser = mutable.users.find((item) => item.id === userId);
+      if (storedUser) {
+        storedUser.maritimeAgentId = agent.id;
+        storedUser.maritimeAgentName = agent.name;
+      }
+    });
+    return deliverDirective(currentUser, activeExisting);
+  }
+
+  const goals = store.goals.filter((goal) => goal.userId === userId && goal.status === 'active');
   const agent = await ensureAgent(user);
   const currentUser: User = { ...user, maritimeAgentId: agent.id, maritimeAgentName: agent.name };
   const plan = await planToday(currentUser, goals);
-  const goal = goals.find((g) => g.id === plan.goalId) ?? goals[0];
+  const goal = goals.find((item) => item.id === plan.goalId) ?? goals[0];
   if (!goal) throw new Error('No active goal found.');
+
   const deadline = new Date(plan.deadline);
   if (Number.isNaN(deadline.getTime()) || deadline <= new Date()) {
     deadline.setTime(Date.now() + 12 * 60 * 60 * 1000);
   }
+
   const directive: Directive = {
     id: id('directive'),
     userId,
@@ -33,19 +76,20 @@ export async function runMorning(userId: string): Promise<Directive> {
     estimatedProgressPoints: Math.max(1, Math.min(15, Math.round(plan.estimatedProgressPoints || 1))),
     penaltyCents: Math.min(user.penaltyPerFailureCents, user.weeklyPenaltyCapCents),
     status: 'active',
+    deliveryStatus: 'pending',
     createdAt: new Date().toISOString(),
   };
 
   await updateStore((mutable) => {
-    const u = mutable.users.find((item) => item.id === userId);
-    if (u) {
-      u.maritimeAgentId = agent.id;
-      u.maritimeAgentName = agent.name;
+    const storedUser = mutable.users.find((item) => item.id === userId);
+    if (storedUser) {
+      storedUser.maritimeAgentId = agent.id;
+      storedUser.maritimeAgentName = agent.name;
     }
     mutable.directives.push(directive);
   });
-  await notify({ ...currentUser, maritimeAgentId: agent.id }, directive);
-  return directive;
+
+  return deliverDirective(currentUser, directive);
 }
 
 export async function evaluateDirective(directiveId: string): Promise<'completed' | 'failed' | 'active'> {
