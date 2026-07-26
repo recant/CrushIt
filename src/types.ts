@@ -1,5 +1,6 @@
 export type NotificationChannel = 'maritime' | 'sms' | 'email' | 'console';
 export type DirectiveStatus = 'active' | 'completed' | 'failed' | 'appealed';
+export type DeliveryStatus = 'pending' | 'sent' | 'failed';
 
 export interface User {
   id: string;
@@ -48,6 +49,9 @@ export interface Directive {
   estimatedProgressPoints: number;
   penaltyCents: number;
   status: DirectiveStatus;
+  deliveryStatus?: DeliveryStatus;
+  deliveryError?: string;
+  deliveredAt?: string;
   createdAt: string;
   completedAt?: string;
   failedAt?: string;
