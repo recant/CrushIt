@@ -1,6 +1,7 @@
 import type { Directive, User } from './types.js';
 import { money } from './util.js';
 
+const NTFY_BASE_URL = process.env.NTFY_BASE_URL?.trim() || 'https://ntfy.sh';
 const INKBOX_API_BASE = process.env.INKBOX_API_BASE_URL?.trim() || 'https://inkbox.ai/api/v1';
 
 export function directiveMessage(directive: Directive): string {
@@ -17,6 +18,24 @@ export function directiveMessage(directive: Directive): string {
 async function responseError(response: Response): Promise<string> {
   const text = await response.text();
   return text ? `${response.status}: ${text.slice(0, 500)}` : String(response.status);
+}
+
+async function sendNtfy(body: string): Promise<void> {
+  const topic = process.env.NTFY_TOPIC?.trim();
+  if (!topic) throw new Error('NTFY_TOPIC is required for ntfy delivery.');
+
+  const response = await fetch(`${NTFY_BASE_URL.replace(/\/$/, '')}/${encodeURIComponent(topic)}`, {
+    method: 'POST',
+    headers: {
+      Title: "Today's required action",
+      Priority: 'high',
+      Tags: 'dart',
+      'Content-Type': 'text/plain; charset=utf-8',
+    },
+    body,
+  });
+
+  if (!response.ok) throw new Error(`ntfy delivery failed (${await responseError(response)})`);
 }
 
 function inkboxApiKey(): string {
@@ -121,6 +140,14 @@ async function sendEmail(user: User, body: string): Promise<void> {
 
 export async function notify(user: User, directive: Directive): Promise<void> {
   const message = directiveMessage(directive);
+
+  // ntfy is the zero-configuration app-level transport. When configured, it
+  // deliberately overrides legacy per-user channel values such as "maritime".
+  if (process.env.NTFY_TOPIC?.trim()) {
+    await sendNtfy(message);
+    return;
+  }
+
   switch (user.notificationChannel) {
     case 'maritime':
       await sendThroughInkbox(user, message);
