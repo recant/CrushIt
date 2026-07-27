@@ -1,4 +1,4 @@
-# Goal Governor
+# CrushIt
 
 A runnable MVP for a near-zero-input goal agent:
 
