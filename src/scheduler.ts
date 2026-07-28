@@ -10,10 +10,11 @@ async function morningTick(): Promise<void> {
     const local = localDateTimeParts(user.timezone);
     if (local.time !== user.morningTime || user.lastMorningRunLocalDate === local.date) continue;
     try {
-      await runMorning(user.id);
+      const directive = await runMorning(user.id);
+      if (directive.deliveryStatus !== 'sent') continue;
       await updateStore((mutable) => {
-        const u = mutable.users.find((item) => item.id === user.id);
-        if (u) u.lastMorningRunLocalDate = local.date;
+        const storedUser = mutable.users.find((item) => item.id === user.id);
+        if (storedUser) storedUser.lastMorningRunLocalDate = local.date;
       });
     } catch (error) {
       console.error('Morning run failed for', user.id, error);
@@ -23,7 +24,7 @@ async function morningTick(): Promise<void> {
 
 async function deadlineTick(): Promise<void> {
   const store = await readStore();
-  for (const directive of store.directives.filter((d) => d.status === 'active')) {
+  for (const directive of store.directives.filter((item) => item.status === 'active')) {
     try {
       await evaluateDirective(directive.id);
     } catch (error) {

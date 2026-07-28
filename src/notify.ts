@@ -140,17 +140,10 @@ async function sendEmail(user: User, body: string): Promise<void> {
 
 export async function notify(user: User, directive: Directive): Promise<void> {
   const message = directiveMessage(directive);
-
-  // ntfy is the zero-configuration app-level transport. When configured, it
-  // deliberately overrides legacy per-user channel values such as "maritime".
-  if (process.env.NTFY_TOPIC?.trim()) {
-    await sendNtfy(message);
-    return;
-  }
-
   switch (user.notificationChannel) {
     case 'maritime':
-      await sendThroughInkbox(user, message);
+      if (process.env.NTFY_TOPIC?.trim()) await sendNtfy(message);
+      else await sendThroughInkbox(user, message);
       break;
     case 'sms':
       await sendSms(user, message);
